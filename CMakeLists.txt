@@ -5,6 +5,9 @@ project(SOEM
     VERSION 1.4.0
     LANGUAGES C)
 
+## build options
+set(BUILD_SHARED_LIBS CACHE BOOL "If present and true, this will cause all libraries to be built shared.")
+
 if (CMAKE_INSTALL_PREFIX_INITIALIZED_TO_DEFAULT)
   # Default to installing in SOEM source directory
   set(CMAKE_INSTALL_PREFIX ${CMAKE_CURRENT_LIST_DIR}/install)
@@ -68,8 +71,7 @@ file(GLOB OSHW_SOURCES oshw/${OS}/*.c)
 file(GLOB SOEM_HEADERS soem/*.h)
 file(GLOB OSAL_HEADERS osal/osal.h osal/${OS}/*.h)
 file(GLOB OSHW_HEADERS oshw/${OS}/*.h)
-
-add_library(soem STATIC
+add_library(soem 
   ${SOEM_SOURCES}
   ${OSAL_SOURCES}
   ${OSHW_SOURCES}
