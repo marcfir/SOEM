@@ -84,6 +84,11 @@ typedef struct
    pthread_mutex_t getindex_mutex;
    pthread_mutex_t tx_mutex;
    pthread_mutex_t rx_mutex;
+   /** Data */
+   int useSoTxtime;
+   clockid_t txtime_clockid;
+   uint64 txtime_ns;
+   uint64 txtime_offset_ns;
 } ecx_portt;
 
 extern const uint16 priMAC[3];
@@ -97,8 +102,8 @@ int ec_setupnic(const char * ifname, int secondary);
 int ec_closenic(void);
 void ec_setbufstat(uint8 idx, int bufstat);
 uint8 ec_getindex(void);
-int ec_outframe(uint8 idx, int sock);
-int ec_outframe_red(uint8 idx);
+int ec_outframe(uint8 idx, int sock, uint64_t txtime_ns);
+int ec_outframe_red(uint8 idx, uint64_t txtime_ns);
 int ec_waitinframe(uint8 idx, int timeout);
 int ec_srconfirm(uint8 idx,int timeout);
 #endif
@@ -108,8 +113,8 @@ int ecx_setupnic(ecx_portt *port, const char * ifname, int secondary);
 int ecx_closenic(ecx_portt *port);
 void ecx_setbufstat(ecx_portt *port, uint8 idx, int bufstat);
 uint8 ecx_getindex(ecx_portt *port);
-int ecx_outframe(ecx_portt *port, uint8 idx, int sock);
-int ecx_outframe_red(ecx_portt *port, uint8 idx);
+int ecx_outframe(ecx_portt *port, uint8 idx, int sock, uint64_t txtime_ns);
+int ecx_outframe_red(ecx_portt *port, uint8 idx, uint64_t txtime_ns);
 int ecx_waitinframe(ecx_portt *port, uint8 idx, int timeout);
 int ecx_srconfirm(ecx_portt *port, uint8 idx,int timeout);
 

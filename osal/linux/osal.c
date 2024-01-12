@@ -26,7 +26,7 @@ ec_timet osal_current_time(void)
    struct timespec current_time;
    ec_timet return_value;
 
-   clock_gettime(CLOCK_REALTIME, &current_time);
+   clock_gettime(CLOCK_TAI, &current_time);
    return_value.sec = current_time.tv_sec;
    return_value.usec = current_time.tv_nsec / 1000;
 

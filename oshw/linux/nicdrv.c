@@ -32,20 +32,26 @@
 
 #include <sys/types.h>
 #include <sys/ioctl.h>
-#include <net/if.h>
+#include <linux/if.h>
 #include <sys/socket.h>
 #include <unistd.h>
 #include <sys/time.h>
-#include <time.h>
 #include <arpa/inet.h>
 #include <stdio.h>
 #include <fcntl.h>
 #include <string.h>
 #include <netpacket/packet.h>
 #include <pthread.h>
+#include <errno.h>
+#include <linux/errqueue.h>
+#include <linux/net_tstamp.h>
+#include <linux/socket.h>
+#include <linux/sockios.h>
 
 #include "oshw.h"
 #include "osal.h"
+
+#define LEAP_SECOND_CORRECTION 37
 
 /** Redundancy modes */
 enum
@@ -144,6 +150,47 @@ int ecx_setupnic(ecx_portt *port, const char *ifname, int secondary)
    }
    /* we use RAW packet socket, with packet type ETH_P_ECAT */
    *psock = socket(PF_PACKET, SOCK_RAW, htons(ETH_P_ECAT));
+
+   if (*psock == -1)
+   {
+      printf("[ERROR] Could not create socket: %s, %d\n", strerror(errno), errno);
+   }
+
+   if (port->useSoTxtime == TRUE)
+   {
+      struct sock_txtime txtime = {.clockid = port->txtime_clockid, .flags = SOF_TXTIME_REPORT_ERRORS};
+      r = setsockopt(*psock, SOL_SOCKET, SO_TXTIME, &txtime, sizeof(txtime));
+      if (r != 0)
+      {
+         printf("[ERROR] Specify SO_TXTIME failed: %s, %d\n", strerror(errno), errno);
+      }
+      else
+      {
+         printf("[INFO] Set SO_TXTIME\n");
+      }
+
+      __u32 val = SOF_TIMESTAMPING_TX_HARDWARE /* or any other flag */;
+      r = setsockopt(*psock, SOL_SOCKET, SO_TIMESTAMPING, &val, sizeof(val));
+      if (r != 0)
+      {
+         printf("[ERROR] Specify SO_TIMESTAMPING failed: %s, %d\n", strerror(errno), errno);
+      }
+      else
+      {
+         printf("[INFO] Set SO_TIMESTAMPING\n");
+      }
+
+      struct hwtstamp_config hwc;
+      hwc.flags = 0;
+      hwc.tx_type = HWTSTAMP_TX_ON;
+      hwc.rx_filter = HWTSTAMP_FILTER_ALL;
+      ifr.ifr_data = (char *)&hwc;
+      ifr.ifr_ifindex = *psock;
+      if (ioctl(*psock, SIOCSHWTSTAMP, &ifr) < 0)
+      {
+         printf("[ERROR] Could not enable HW timestamps: %s", strerror(errno));
+      }
+   }
 
    timeout.tv_sec =  0;
    timeout.tv_usec = 1;
@@ -262,12 +309,13 @@ void ecx_setbufstat(ecx_portt *port, uint8 idx, int bufstat)
 }
 
 /** Transmit buffer over socket (non blocking).
- * @param[in] port        = port context struct
- * @param[in] idx         = index in tx buffer array
+ * @param[in] port         = port context struct
+ * @param[in] idx          = index in tx buffer array
  * @param[in] stacknumber  = 0=Primary 1=Secondary stack
+ * @param[in] txtime_ns    = transmit timestamp
  * @return socket send result
  */
-int ecx_outframe(ecx_portt *port, uint8 idx, int stacknumber)
+int ecx_outframe(ecx_portt *port, uint8 idx, int stacknumber, uint64_t txtime_ns)
 {
    int lp, rval;
    ec_stackT *stack;
@@ -282,7 +330,52 @@ int ecx_outframe(ecx_portt *port, uint8 idx, int stacknumber)
    }
    lp = (*stack->txbuflength)[idx];
    (*stack->rxbufstat)[idx] = EC_BUF_TX;
-   rval = send(*stack->sock, (*stack->txbuf)[idx], lp, 0);
+   
+   if (!port->useSoTxtime)
+   {
+      rval = send(*stack->sock, (*stack->txbuf)[idx], lp, 0);
+   }
+   else
+   {
+      if (txtime_ns == 0)
+      {
+         struct timespec time;
+         clock_gettime(port->txtime_clockid, &time);
+         txtime_ns = time.tv_sec * 1000000000ULL + time.tv_nsec + port->txtime_offset_ns;
+      }
+
+      // https://lwn.net/Articles/748879/
+      // https://man7.org/linux/man-pages/man3/cmsg.3.html
+      struct msghdr msgh = {0};
+      char buf[CMSG_SPACE(sizeof(txtime_ns)) /*+ CMSG_SPACE(sizeof(__u32))*/] = {0};
+      msgh.msg_control = buf;
+      msgh.msg_controllen = sizeof(buf);
+      msgh.msg_flags = 0;
+      msgh.msg_namelen = 0;
+
+      struct cmsghdr *cmsg;
+      cmsg = CMSG_FIRSTHDR(&msgh);
+      if (cmsg != NULL)
+      {
+         cmsg->cmsg_level = SOL_SOCKET;
+         cmsg->cmsg_type = SCM_TXTIME;
+         cmsg->cmsg_len = CMSG_LEN(sizeof(txtime_ns));
+         uint64 *pTxTime_ns = (uint64 *)CMSG_DATA(cmsg);
+         *pTxTime_ns = txtime_ns;
+      }
+      else
+      {
+         printf("[ERROR] Could not attache cmsg SCM_TXTIME\n");
+      }
+
+      struct iovec iov = {0};
+      iov.iov_base = (void *)((*stack->txbuf)[idx]);
+      iov.iov_len = lp;
+      msgh.msg_iov = &iov;
+      msgh.msg_iovlen = 1;
+      rval = sendmsg(*stack->sock, &msgh, 0);
+   }
+
    if (rval == -1)
    {
       (*stack->rxbufstat)[idx] = EC_BUF_EMPTY;
@@ -292,11 +385,12 @@ int ecx_outframe(ecx_portt *port, uint8 idx, int stacknumber)
 }
 
 /** Transmit buffer over socket (non blocking).
- * @param[in] port        = port context struct
- * @param[in] idx = index in tx buffer array
+ * @param[in] port      = port context struct
+ * @param[in] idx       = index in tx buffer array
+ * @param[in] txtime_ns = transmit timestamp
  * @return socket send result
  */
-int ecx_outframe_red(ecx_portt *port, uint8 idx)
+int ecx_outframe_red(ecx_portt *port, uint8 idx, uint64_t txtime_ns)
 {
    ec_comt *datagramP;
    ec_etherheadert *ehp;
@@ -306,7 +400,7 @@ int ecx_outframe_red(ecx_portt *port, uint8 idx)
    /* rewrite MAC source address 1 to primary */
    ehp->sa1 = htons(priMAC[1]);
    /* transmit over primary socket*/
-   rval = ecx_outframe(port, idx, 0);
+   rval = ecx_outframe(port, idx, 0, txtime_ns);
    if (port->redstate != ECT_RED_NONE)
    {
       pthread_mutex_lock( &(port->tx_mutex) );
@@ -521,7 +615,8 @@ static int ecx_waitinframe_red(ecx_portt *port, uint8 idx, osal_timert *timer)
          }
          osal_timer_start (&timer2, EC_TIMEOUTRET);
          /* resend secondary tx */
-         ecx_outframe(port, idx, 1);
+         port->txtime_ns = 0;
+         ecx_outframe(port, idx, 1, 0);
          do
          {
             /* retrieve frame */
@@ -579,7 +674,8 @@ int ecx_srconfirm(ecx_portt *port, uint8 idx, int timeout)
    do
    {
       /* tx frame on primary and if in redundant mode a dummy on secondary */
-      ecx_outframe_red(port, idx);
+      port->txtime_ns = 0;
+      ecx_outframe_red(port, idx, 0);
       if (timeout < EC_TIMEOUTRET)
       {
          osal_timer_start (&timer2, timeout);
@@ -618,14 +714,14 @@ void ec_setbufstat(uint8 idx, int bufstat)
    ecx_setbufstat(&ecx_port, idx, bufstat);
 }
 
-int ec_outframe(uint8 idx, int stacknumber)
+int ec_outframe(uint8 idx, int stacknumber, uint64_t txtime_ns)
 {
-   return ecx_outframe(&ecx_port, idx, stacknumber);
+   return ecx_outframe(&ecx_port, idx, stacknumber, txtime_ns);
 }
 
-int ec_outframe_red(uint8 idx)
+int ec_outframe_red(uint8 idx, uint64_t txtime_ns)
 {
-   return ecx_outframe_red(&ecx_port, idx);
+   return ecx_outframe_red(&ecx_port, idx, txtime_ns);
 }
 
 int ec_inframe(uint8 idx, int stacknumber)

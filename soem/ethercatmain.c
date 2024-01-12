@@ -1778,7 +1778,11 @@ static int ecx_main_send_processdata(ecx_contextt *context, uint8 group, boolean
                   first = FALSE;
                }
                /* send frame */
-               ecx_outframe_red(context->port, idx);
+               #ifdef __linux__
+                  ecx_outframe_red(context->port, idx, context->port->txtime_ns);
+               #else
+                  ecx_outframe_red(context->port, idx);
+               #endif
                /* push index and data pointer on stack */
                ecx_pushindex(context, idx, data, sublength, DCO);
                length -= sublength;
@@ -1816,7 +1820,11 @@ static int ecx_main_send_processdata(ecx_contextt *context, uint8 group, boolean
                   first = FALSE;
                }
                /* send frame */
-               ecx_outframe_red(context->port, idx);
+               #ifdef __linux__
+                  ecx_outframe_red(context->port, idx, context->port->txtime_ns);
+               #else
+                  ecx_outframe_red(context->port, idx);
+               #endif
                /* push index and data pointer on stack */
                ecx_pushindex(context, idx, data, sublength, DCO);
                length -= sublength;
@@ -1857,7 +1865,11 @@ static int ecx_main_send_processdata(ecx_contextt *context, uint8 group, boolean
                first = FALSE;
             }
             /* send frame */
-            ecx_outframe_red(context->port, idx);
+              #ifdef __linux__
+                  ecx_outframe_red(context->port, idx, context->port->txtime_ns);
+               #else
+                  ecx_outframe_red(context->port, idx);
+               #endif
             /* push index and data pointer on stack.
              * the iomapinputoffset compensate for where the inputs are stored 
              * in the IOmap if we use an overlapping IOmap. If a regular IOmap
